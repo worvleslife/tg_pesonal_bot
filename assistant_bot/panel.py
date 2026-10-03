@@ -155,6 +155,7 @@ class Panel:
             if not rows:
                 rows=[[B('🏠 Меню',callback_data='home')]]
             self.store.set_setting(owner,'ui_panel_notice',text)
+            self.store.set_setting(owner,'ui_panel_notice_keys',json.dumps(keyboard.to_dict() if keyboard else None))
             combined=text+('\n\n────────\n'+body if body else '')
             revision=self.revisions.setdefault(owner,1)
             combined,keys=self.prepare(owner,combined,K(rows),revision)
@@ -181,6 +182,10 @@ class Panel:
             notice=self.store.get_setting(handle.owner,'ui_panel_notice','')
             if notice:
                 text=notice+'\n\n────────\n'+text
+                notice_keys=json.loads(self.store.get_setting(handle.owner,'ui_panel_notice_keys','null'))
+                if notice_keys:
+                    notice_keys=K.de_json(notice_keys,None)
+                    keyboard=K(list(notice_keys.inline_keyboard)+list(getattr(keyboard,'inline_keyboard',()) or ()))
             text,keyboard=self.prepare(handle.owner,text,keyboard,handle.revision)
             # Missing progress panel does not cause an unsolicited replacement.
             return await self.edit(handle.owner,handle.message_id,text,keyboard)

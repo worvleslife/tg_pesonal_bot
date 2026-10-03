@@ -1,9 +1,10 @@
 """Real handler integration with a mocked Telegram transport and persistent panel."""
 import asyncio
+from dataclasses import replace
 from html import unescape
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from telegram import InlineKeyboardMarkup, ReplyKeyboardRemove
 from telegram.error import BadRequest, RetryAfter, TimedOut
@@ -158,7 +159,7 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(completing,navigation)
         self.assertEqual(self.latest()['text'],'Новая страница')
 
-    async def test_files_ai_answers_and_private_guard_remain_separate(self):
+    async def test_files_are_separate_but_ai_reply_uses_panel(self):
         source=self.db.add_item(self.owner,'','Документ','Учёба',[],kind='document',file_id='file')
         await self.click('home')
         await self.click(f'open:{source["id"]}')
@@ -166,11 +167,36 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         update=self.update('Вопрос')
         scope=panel.bind(self.ctx,update)
         try:
-            await chat.reply(update,'Ожидание ответа',separate=True)
+            await chat.reply(update,'Ожидание ответа')
         finally:
             panel.unbind(scope)
-        update.effective_message.reply_text.assert_awaited_once()
+        update.effective_message.reply_text.assert_not_awaited()
         self.assertEqual(self.telegram.send_message.await_count,1)
+
+    async def test_ai_busy_then_notification_preserves_answer_and_page_buttons(self):
+        self.app.bot_data['config']=replace(self.app.bot_data['config'],yandex_api_key='offline',yandex_folder_id='testfolder')
+        self.app.create_task=asyncio.create_task
+        ready,release=asyncio.Event(),asyncio.Event()
+        async def answer(**kwargs):
+            ready.set()
+            await release.wait()
+            return 'Подробный ответ. '*500
+        with patch('assistant_bot.chat.generate_reply',answer):
+            await self.click('ai:chat')
+            await bot.message(self.update('Первый вопрос'),self.ctx)
+            await ready.wait()
+            task=self.app.bot_data['ai_tasks'][self.owner]
+            await bot.message(self.update('Второй вопрос'),self.ctx)
+            await self.manager.notify(self.owner,'Напоминание')
+            release.set()
+            await task
+        self.assertIn('Подробный ответ',self.latest()['text'])
+        self.assertIn('Напоминание',self.latest()['text'])
+        self.assertEqual(len(self.db.chat_history(self.owner)),2)
+        token=next(iter(self.app.bot_data['ai_answers']))
+        await self.click(f'ai:page:{token}:1')
+        self.assertEqual(self.app.bot_data['ai_answers'][token]['page'],1)
+        self.assertEqual(self.telegram.send_message.await_count,2)
         group=self.update('/start',chat_type='group')
         await bot.command(group,self.ctx)
-        self.assertEqual(self.telegram.send_message.await_count,1)
+        self.assertEqual(self.telegram.send_message.await_count,2)

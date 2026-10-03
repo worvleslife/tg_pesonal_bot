@@ -18,6 +18,7 @@ from typing import Any
 from .memory_store import MemoryStore, SCHEMA as MEMORY_SCHEMA
 from .extraction_store import ExtractionStore, SCHEMA as EXTRACTION_SCHEMA
 from .cleanup_store import CleanupStore, SCHEMA as CLEANUP_SCHEMA
+from .inbox_store import InboxStore, SCHEMA as INBOX_SCHEMA
 
 
 def _normalize(value: str) -> str:
@@ -41,7 +42,7 @@ def _search_text(text: str, title: str, category: str, tags: list[str],
     return _normalize("\n".join([text, title, category, *tags, *urls, file_name or ""]))
 
 
-class Store(MemoryStore, ExtractionStore, CleanupStore):
+class Store(MemoryStore, ExtractionStore, CleanupStore, InboxStore):
     """A SQLite repository. Always supply the authenticated user's owner_id."""
 
     def __init__(self, path: str | Path) -> None:
@@ -215,6 +216,7 @@ class Store(MemoryStore, ExtractionStore, CleanupStore):
             self._conn.executescript(MEMORY_SCHEMA)
             self._conn.executescript(EXTRACTION_SCHEMA)
             self._conn.executescript(CLEANUP_SCHEMA)
+            self._conn.executescript(INBOX_SCHEMA)
             self.migrate_extractions()
             self.backfill_memory_attachments()
 
@@ -573,6 +575,8 @@ class Store(MemoryStore, ExtractionStore, CleanupStore):
     def _filters(owner_id: int, query: str = "", category: str | None = None,
                  favorites: bool = False) -> tuple[str, list[Any]]:
         clauses = ["owner_id = ?"]
+        if not query and not favorites:
+            clauses.append("NOT EXISTS(SELECT 1 FROM inbox_jobs j WHERE j.owner_id=items.owner_id AND j.item_id=items.id AND j.status='done' AND j.destination='tasks')")
         params: list[Any] = [owner_id]
         if category is not None:
             clauses.append("category = ?")
@@ -582,7 +586,7 @@ class Store(MemoryStore, ExtractionStore, CleanupStore):
         # Literal substring terms, not SQL wildcards. NFKC + casefold supports
         # Cyrillic and Unicode far beyond SQLite's ASCII-only default LIKE.
         for term in _normalize(query).split():
-            clauses.append("instr(search_text || COALESCE((SELECT extraction_normalize(accepted) FROM extractions e WHERE e.owner_id=items.owner_id AND e.source_kind='library' AND e.source_id=items.id), ''), ?) > 0")
+            clauses.append("instr(search_text || COALESCE((SELECT extraction_normalize(accepted) FROM extractions e WHERE e.owner_id=items.owner_id AND e.source_kind='library' AND e.source_id=items.id), '') || COALESCE((SELECT extraction_normalize(summary || char(10) || raw_text) FROM inbox_jobs j WHERE j.owner_id=items.owner_id AND j.item_id=items.id), ''), ?) > 0")
             params.append(term)
         return " AND ".join(clauses), params
 
@@ -839,15 +843,15 @@ class Store(MemoryStore, ExtractionStore, CleanupStore):
     def get_task(self, owner_id, task_id):
         with self._lock:
             row = self._conn.execute("SELECT * FROM tasks WHERE owner_id=? AND id=?", (owner_id,task_id)).fetchone()
-        return dict(row) if row else None
+            return self.with_effort(row)
 
     def list_tasks(self, owner_id, *, status='active', limit=8, offset=0, minutes=None):
         limit, offset = self._page(limit, offset)
         with self._lock:
             rows = self._conn.execute('''SELECT * FROM tasks WHERE owner_id=? AND status=?
-                AND (? IS NULL OR minutes<=?) ORDER BY priority DESC,id LIMIT ? OFFSET ?''',
+                AND (? IS NULL OR COALESCE((SELECT e.minutes FROM task_effort e WHERE e.owner_id=tasks.owner_id AND e.task_id=tasks.id),minutes)<=?) ORDER BY priority DESC,id LIMIT ? OFFSET ?''',
                 (owner_id,status,minutes,minutes,limit,offset)).fetchall()
-        return [dict(row) for row in rows]
+            return [self.with_effort(row) for row in rows]
 
     def task_counts(self, owner_id):
         with self._lock:
@@ -858,8 +862,8 @@ class Store(MemoryStore, ExtractionStore, CleanupStore):
     def edit_task(self, owner_id, task_id, *, title=None, minutes=None, priority=None, done=None):
         if title is not None:
             title = self._work_title(title, 300)
-        if minutes is not None and minutes not in (5,15,25,50):
-            raise ValueError("Выбери 5, 15, 25 или 50 минут.")
+        if minutes is not None and (type(minutes) is not int or not 1 <= minutes <= 1440):
+            raise ValueError("Укажи от 1 до 1440 минут.")
         with self._lock, self._conn:
             task = self.get_task(owner_id, task_id)
             if not task:
@@ -870,7 +874,10 @@ class Store(MemoryStore, ExtractionStore, CleanupStore):
             if title is not None:
                 changes['title'] = title
             if minutes is not None:
-                changes['minutes'] = minutes
+                changes['minutes'] = min((5,15,25,50), key=lambda value: abs(value-minutes))
+                self._conn.execute('''INSERT INTO task_effort VALUES(?,?,?,'',0)
+                    ON CONFLICT(owner_id,task_id) DO UPDATE SET minutes=excluded.minutes,reason='',ai=0''',
+                    (owner_id,task_id,minutes))
             if priority is not None:
                 changes['priority'] = int(bool(priority) and task['status'] == 'active')
             if done is not None:
@@ -1031,16 +1038,17 @@ class Store(MemoryStore, ExtractionStore, CleanupStore):
             work_materials = self._conn.execute(
                 "SELECT * FROM work_materials WHERE owner_id = ? ORDER BY id",
                 (owner_id,)).fetchall()
-            tasks = self._conn.execute('SELECT * FROM tasks WHERE owner_id=? ORDER BY id', (owner_id,)).fetchall()
+            tasks = [self.with_effort(row) for row in self._conn.execute('SELECT * FROM tasks WHERE owner_id=? ORDER BY id', (owner_id,)).fetchall()]
             checkpoints=self._conn.execute('SELECT * FROM task_checkpoints WHERE owner_id=? ORDER BY task_id',(owner_id,)).fetchall()
             study=self._conn.execute('SELECT * FROM study_cards WHERE owner_id=? ORDER BY id',(owner_id,)).fetchall()
         return {"version": 7, "owner_id": owner_id, "exported_at": int(time.time()),
                 **self.cleanup_export(owner_id),
+                **self.inbox_export(owner_id),
                 **self.extraction_export(owner_id),
                 **self.memory_export(owner_id),
                 "task_checkpoints": [dict(row) for row in checkpoints],
                 "study_cards": [dict(row) for row in study],
-                "tasks": [dict(row) for row in tasks],
+                "tasks": tasks,
                 "items": [self._item(row) for row in items],
                 "reminders": [dict(row) for row in reminders],
                 "settings": {row["key"]: row["value"] for row in settings},

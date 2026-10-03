@@ -123,7 +123,13 @@ class ExtractionStore:
         row = self.extraction(owner, kind, ident)
         text = source['text'] or ''
         if row and row['accepted']:
-            text += '\n\n[Текст вложения, проверен пользователем]\n' + row['accepted']
+            text += '\n\n[Текст вложения, сохранён после подтверждения]\n' + row['accepted']
+        if kind == 'library':
+            job = self.inbox_job(owner, ident)
+            if job and job['summary']:
+                text += '\n\n[Авторазбор ИИ, не проверен пользователем]\n' + job['summary']
+            if job and job['raw_text'] and source.get('file_id'):
+                text += '\n\n[Извлечённый текст, возможны ошибки]\n' + job['raw_text']
         return text.strip()
 
     def extraction_export(self, owner):

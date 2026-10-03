@@ -38,14 +38,20 @@ async def send_original(ctx,owner,kind,file_id,file_name=None):
     manager=ctx.application.bot_data.get('cleanup')
     payload=file_id
     if manager:
+        if not manager.store.has_file_reference(owner,file_id):
+            raise ValueError('Материал недоступен.')
         row=manager.store.local_file(owner,file_id)
         if row and row['status']=='ready' and manager.store.has_file_reference(owner,file_id):
-            path=manager.path(row['relative_path'])
-            if path.is_file() and path.stat().st_size==row['size']:
-                content=await asyncio.to_thread(path.read_bytes)
-                if hashlib.sha256(content).hexdigest()==row['sha256']:
-                    payload=InputFile(content,filename=file_name or manager.default_name(kind))
-    sent=await getattr(ctx.bot,MEDIA[kind])(owner,payload)
+            try:
+                path=manager.path(row['relative_path'])
+                if path.is_file() and path.stat().st_size==row['size']:
+                    content=await asyncio.to_thread(path.read_bytes)
+                    if hashlib.sha256(content).hexdigest()==row['sha256']:
+                        payload=InputFile(content,filename=file_name or manager.default_name(kind))
+            except (OSError,ValueError):
+                pass  # An owned Telegram reference remains a retrieval fallback.
+    extra={'caption':'Копия исчезнет из чата через час. Оригинал останется в материалах.'} if manager and kind!='video_note' else {}
+    sent=await getattr(ctx.bot,MEDIA[kind])(owner,payload,**extra)
     track_delivery(ctx,owner,sent)
     return sent
 
@@ -54,7 +60,7 @@ async def send_document(update,ctx,document,**kwargs):
     if ctx.application.bot_data.get('cleanup'):
         caption=kwargs.get('caption','')
         kwargs['caption']=(caption+'\nФайл исчезнет из чата через час; данные останутся в боте.').strip()[:1000]
-    sent=await update.effective_message.reply_document(document=document,**kwargs)
+    sent=await update.effective_message.reply_document(document,**kwargs)
     track_delivery(ctx,update.effective_user.id,sent)
     return sent
 
@@ -169,9 +175,11 @@ class Cleanup:
                         self.store.archive_state(*key,'running')
                         self.tasks[key]=asyncio.create_task(self.archive(job))
             for row in self.store.archived_receipts():
-                if self.store.has_file_reference(row['owner_id'],row['file_id']) and await self.verify(row):
+                if not await self.verify(row):
+                    self.store.archive_state(row['owner_id'],row['file_id'],'blocked',error='Локальная копия повреждена или отсутствует. Входящий файл оставлен.')
+                elif self.store.has_file_reference(row['owner_id'],row['file_id']):
                     self.store.queue_delete(row['owner_id'],row['message_id'],'archived_input')
-            for row in self.store.cleanup_jobs(now):
+            for row in self.store.cleanup_jobs(int(time.time())):
                 owner,ident=row['owner_id'],row['message_id']
                 if self.store.get_setting(owner,'ui_panel_message','')==str(ident):
                     continue
@@ -181,7 +189,7 @@ class Cleanup:
                     with self.store._lock:
                         receipt=self.store._conn.execute('SELECT file_id FROM chat_receipts WHERE owner_id=? AND message_id=?',(owner,ident)).fetchone()
                     local=self.store.local_file(owner,receipt['file_id']) if receipt else None
-                    if not local or local['status']!='ready' or not self.store.has_file_reference(owner,receipt['file_id']) or not await self.verify(local):
+                    if not local or local['status']!='ready' or not await self.verify(local) or not self.store.has_file_reference(owner,receipt['file_id']):
                         self.store.cleanup_result(owner,ident,'blocked','Нет проверенной локальной копии')
                         continue
                 try:

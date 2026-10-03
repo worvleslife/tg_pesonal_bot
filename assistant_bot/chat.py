@@ -95,8 +95,8 @@ async def chat_info(update, ctx):
                 "Твой вопрос и недавняя история передаются Yandex AI Studio. У каждого пользователя "
                 "своя история; материалы библиотеки автоматически не передаются. "
                 "В памяти остаются до 6 последних пар вопросов и ответов. «Новый диалог» очищает память.\n\n"
-                "Длинные ответы листаются кнопками в одном сообщении. Кнопки старых ответов "
-                "работают до перезапуска бота, очистки диалога или освобождения кеша.\n\n"
+                "Ответы обновляют общую панель. Длинные ответы листаются кнопками; после перехода "
+                "в другой раздел или перезапуска страницы нужно открыть заново.\n\n"
                 f"До {cfg.ai_daily_limit} запросов в день на человека; также действует общий лимит бота. "
                 "/cancel — вернуться к библиотеке и напоминаниям.")
 
@@ -135,7 +135,9 @@ async def handle_chat_message(update, ctx, *, prompt=None):
         return
     tasks = ctx.application.bot_data.setdefault("ai_tasks", {})
     if owner in tasks:
-        await reply(update, "Ещё готовлю ответ на твой предыдущий вопрос. Подожди немного.")
+        pending = ctx.application.bot_data.get('ai_pending', {}).get(owner)
+        if pending:
+            await edit_reply(pending, "Ещё готовлю ответ на твой предыдущий вопрос. Подожди немного.")
         return
     db = ctx.application.bot_data["store"]
     day = datetime.now(timezone.utc).date().isoformat()
@@ -145,6 +147,7 @@ async def handle_chat_message(update, ctx, *, prompt=None):
         return
     history = db.chat_history(owner)
     pending = await reply(update, "💭 Готовлю ответ…")
+    ctx.application.bot_data.setdefault('ai_pending', {})[owner] = pending
     tasks[owner] = ctx.application.create_task(_answer(update, ctx, owner, text, history, pending))
 
 
@@ -202,3 +205,5 @@ async def _answer(update, ctx, owner, text, history, pending):
             data.get("ai_answers", {}).pop(token, None)
         if data.get("ai_tasks", {}).get(owner) is current:
             data["ai_tasks"].pop(owner, None)
+        if data.get('ai_pending', {}).get(owner) is pending:
+            data['ai_pending'].pop(owner, None)

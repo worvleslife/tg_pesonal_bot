@@ -151,6 +151,8 @@ async def card(update, ctx, ident):
         return
     text = f"<b>{escape(task['title'])}</b>\n\n"
     text += ('✅ Выполнено' if task['status'] == 'done' else f"{'⭐ Главное дело · ' if task['priority'] else ''}Оценка: {task['minutes']} мин")
+    if task.get('estimate_ai'):
+        text += '\n<i>≈ Оценка ИИ: '+escape(task['estimate_reason'])+'</i>'
     checkpoint = db(ctx).get_checkpoint(owner,ident)
     if checkpoint:
         text += f"\n\n<b>На чём остановился</b>\n{escape(checkpoint['progress'])}\n\n<b>Следующий шаг</b>\n{escape(checkpoint['next_step'])}"
@@ -238,6 +240,12 @@ async def message(update, ctx):
             progress = ctx.user_data.get('plan_progress','')
             await preview(update,ctx,'checkpoint',f'<b>Сохранить точку продолжения?</b>\n\n{escape(progress)}\n\n<b>Начать с:</b> {escape(text.strip())}\n\nТекущий таймер этого дела остановится.',
                           dict(ident=ctx.user_data.get('plan_edit'),progress=progress,next_step=text.strip()))
+        elif state == 'plan:duration':
+            if not re.fullmatch(r'[0-9]{1,4}', text.strip()) or not 1 <= int(text.strip()) <= 1440:
+                raise ValueError('Пришли число минут от 1 до 1440.')
+            ident = ctx.user_data.get('plan_edit')
+            db(ctx).edit_task(update.effective_user.id, ident, minutes=int(text.strip()))
+            await card(update, ctx, ident)
         elif state == 'plan:rename':
             ident = ctx.user_data.get('plan_edit')
             if not text.strip() or len(text.strip())>300:
@@ -323,7 +331,7 @@ async def callback(update, ctx, data):
                 await enter_chat(update,ctx)
                 if ctx.user_data.get('state')=='ai':
                     await handle_chat_message(update,ctx,prompt=prompt)
-        elif action in ('task','pin','done','restore','rename','checkpoint','estimate','time','focus','start','stop') and len(parts) in (3,4):
+        elif action in ('task','pin','done','restore','rename','checkpoint','estimate','duration','time','focus','start','stop') and len(parts) in (3,4):
             ident = number(parts[2])
             task = db(ctx).get_task(owner,ident)
             if not task:
@@ -353,9 +361,13 @@ async def callback(update, ctx, data):
                 await say(update, '<b>Сохраним место перед паузой</b>\n\nЧто уже получилось и на чём остановился? Напиши короткую заметку себе — до 800 символов. После этого уточним следующий шаг.', CANCEL)
             elif action in ('estimate','focus'):
                 target = 'time' if action=='estimate' else 'start'
+                extra = [[button('Другое время', f'plan:duration:{ident}')]] if action == 'estimate' else []
                 await say(update, 'Сколько минут выделить?' if action=='focus' else 'Сколько примерно займёт дело?',
                           [[button(f'{m} мин',f'plan:{target}:{ident}:{m}') for m in (5,15)],
-                           [button(f'{m} мин',f'plan:{target}:{ident}:{m}') for m in (25,50)], *CANCEL])
+                           [button(f'{m} мин',f'plan:{target}:{ident}:{m}') for m in (25,50)], *extra, *CANCEL])
+            elif action == 'duration':
+                ctx.user_data.update(state='plan:duration',plan_edit=ident)
+                await say(update, 'Сколько минут активной работы займёт дело? Пришли число от 1 до 1440.', CANCEL)
             elif action in ('time','start') and len(parts)==4:
                 minutes=number(parts[3])
                 if minutes not in (5,15,25,50):

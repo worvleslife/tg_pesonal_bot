@@ -22,6 +22,7 @@ def main() -> int:
         store = Store(config.database)
         store.recover_extractions()
         store.recover_archives()
+        store.recover_inbox()
         app = build_application(config, store)
         print("Ассистент запущен для всех пользователей. Для остановки нажми Ctrl+C.")
         print("Каждый пользователь открывает личный чат с ботом и отправляет /start.")

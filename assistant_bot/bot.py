@@ -28,7 +28,7 @@ from .knowledge import organize
 from .parsing import parse_reminder
 from .service import dispatch_due, send_digests, today_text
 from .storage import Store
-from . import workspace, planner, learning, memory, recognition, panel, chat_cleanup
+from . import workspace, planner, learning, memory, recognition, panel, chat_cleanup, inbox
 
 LOG = logging.getLogger(__name__)
 MAIN = Keyboard([
@@ -41,8 +41,9 @@ HELP = (
     "<b>Твой личный ассистент</b>\n\n"
     "«Сегодня» собирает дела, фокус и ближайшие напоминания. «Разгрузить голову» "
     "принимает список дел: одна строка — одно дело. «Что сейчас?» подбирает дело по свободному времени.\n\n"
-    "Отправь текст, ссылку или файл — я сохраню его в библиотеку. Добавь #теги для удобного поиска. "
-    "Категории определяются по тексту, подписи, имени файла и домену ссылки.\n\n"
+    "Отправь текст, ссылку или файл из главного меню. Авторазбор ИИ оформит справку в библиотеку, "
+    "выделит явно указанные личные дела и предложит приблизительное время работы. Оценку можно исправить, сортировку — отменить. "
+    "Авторазбор через Yandex можно выключить в настройках. Добавь #теги для поиска.\n\n"
     "<b>Напоминания</b>\n"
     "<code>/remind через 10 минут купить хлеб</code>\n"
     "<code>/remind завтра в 09:00 позвонить</code>\n"
@@ -58,10 +59,12 @@ HELP = (
     "/study — учебные карточки и повторение\n"
     "/projects — проекты и опыт\n/memory запрос — поиск по личной памяти\n"
     "/settings — часовой пояс и ежедневная сводка\n/cancel — отменить текущий ввод\n\n"
-    "Оригиналы файлов хранятся как ссылки Telegram. В карточке есть «Распознать содержимое»: "
+    "Новые файлы сохраняются на диск перед удалением входящего сообщения. Выданные вложения очищаются из чата через час. "
+    "Оригинал остаётся в материалах; при ошибке скачивания входящий файл не удаляется. "
+    "Для файлов в выбранном проекте/разделе есть «Распознать содержимое»: "
     "PDF с текстом, TXT/MD, фото JPEG/PNG и голосовые Ogg Opus до 30 секунд. "
-    "Фото и голос передаются в Yandex только после нажатия кнопки запуска; действуют лимиты ИИ-запросов. "
-    "Текст попадает в поиск после проверки и подтверждения. Страницы сайтов пока не загружаются. "
+    "При включённом авторазборе входящие материалы передаются в Yandex автоматически; действуют лимиты ИИ-запросов. "
+    "Автоматический текст помечен как непроверенный ИИ-разбор. Страницы сайтов пока не загружаются. "
     "Напоминания приходят, пока программа запущена и есть интернет."
 )
 
@@ -138,7 +141,7 @@ async def home(update, ctx):
               f"Дел: {counts['active']} · Напоминаний: {s['pending']}\n\n"
               "🧭 Выбрать следующий шаг — «Сегодня».\n"
               "📥 Освободить голову — выгрузить список дел.\n"
-              "Ссылку, заметку или файл можно просто прислать сюда.\n\n"
+              "Пришли материал сюда — ИИ распределит его в библиотеку или дела и оценит время. Авторазбор через Yandex можно выключить в настройках.\n\n"
               "Разделы открываются здесь, в одном сообщении. /start — вернуть панель вниз чата.\n\n"
               "Твои дела и материалы доступны только тебе.", MAIN)
 
@@ -201,6 +204,16 @@ async def item_card(update, ctx, item):
     recognize = recognition.button_for(store(ctx), update.effective_user.id, 'library', item)
     if recognize:
         rows.insert(0, [recognize])
+    if store(ctx).inbox_job(update.effective_user.id, ident):
+        rows.insert(0, [Button('✨ Авторазбор: результат / статус', callback_data=f'inbox:view:{ident}')])
+    if item.get('file_id') and ctx.application.bot_data.get('cleanup'):
+        local = store(ctx).local_file(update.effective_user.id, item['file_id'])
+        if local and local['status'] == 'ready':
+            text += '\n\n📎 Оригинал сохранён на диске. Выданная копия удалится из чата через час.'
+        elif local and local['status'] == 'blocked':
+            text += '\n\n⚠️ Локальная копия не создана: '+escape(local['error'])+' Входящее сообщение оставлено.'
+        else:
+            text += '\n\n⏳ Сохраняю оригинал на диск. Входящее вложение удалю только после проверки копии.'
     await say(update, text, Keyboard(rows))
 
 
@@ -241,10 +254,14 @@ async def preview(update, ctx, raw):
 async def settings(update, ctx):
     owner = update.effective_user.id
     digest = store(ctx).get_setting(owner, "digest_time", "off")
+    auto = store(ctx).get_setting(owner, 'auto_inbox', 'on') == 'on'
     await say(update, f"<b>⚙️ Настройки</b>\n\nЧасовой пояс: {escape(tz(ctx, owner))}\n"
+              f"Авторазбор ИИ: {'включён' if auto else 'выключен'}\n"
               f"Ежедневная сводка: {'выключена' if digest == 'off' else escape(digest)}\n\n"
+              "Авторазбор передаёт новый входящий материал в Yandex AI: выделяет суть, создаёт явно указанные дела и оценивает время. Расходует дневной лимит. Отправка в выбранный проект/рабочий раздел сохраняет твой выбор.\n\n"
               "Сводка присылает план на день. Часовой пояс новых напоминаний можно изменить; "
               "уже созданные сохраняют своё расписание.", Keyboard([
+                  [Button('Выключить авторазбор' if auto else 'Включить авторазбор', callback_data='auto:off' if auto else 'auto:on')],
                   [Button("🌍 Часовой пояс", callback_data="timezone")],
                   [Button("☀️ Сводка в 09:00", callback_data="digest:09:00"), Button("Выключить", callback_data="digest:off")],
                   [Button("🕒 Другое время сводки", callback_data="digesttime")],
@@ -408,6 +425,20 @@ async def callback(update, ctx):
         return
     owner = update.effective_user.id
     db = store(ctx)
+    if data.startswith('inbox:') or data in ('auto:on', 'auto:off'):
+        leave_chat(ctx, owner)
+        recognition.clear(ctx)
+        memory.clear(ctx)
+        workspace.clear_draft(ctx)
+        planner.clear(ctx)
+        learning.clear(ctx)
+        ctx.user_data.pop('state', None)
+        if data.startswith('auto:'):
+            db.set_setting(owner, 'auto_inbox', data.split(':')[1])
+            await settings(update, ctx)
+        else:
+            await inbox.callback(update, ctx, data)
+        return
     if data.startswith('rec:'):
         leave_chat(ctx, owner)
         memory.clear(ctx)
@@ -765,6 +796,8 @@ async def message(update, ctx):
     item = store(ctx).add_item(owner,text=text,kind=kind,file_id=file_id,file_name=file_name,
         source_chat_id=msg.chat_id,source_message_id=msg.message_id,**organized)
     ctx.user_data.pop("state",None)
+    if await inbox.enqueue(update, ctx, item):
+        return
     await say(update,"✅ Сохранил в базу знаний.")
     await item_card(update,ctx,item)
 
@@ -779,9 +812,14 @@ async def tick(ctx):
 async def housekeeping(ctx):
     if manager:=ctx.application.bot_data.get('cleanup'):
         await manager.tick()
+    await inbox.tick(ctx)
 
 
 async def shutdown(app):
+    tasks=list(app.bot_data.get('inbox_tasks', {}).values())
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks,return_exceptions=True)
     if manager:=app.bot_data.get('cleanup'):
         tasks=list(manager.tasks.values())
         for task in tasks:

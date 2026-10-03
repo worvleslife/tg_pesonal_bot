@@ -18,6 +18,8 @@ class WorkBotTests(unittest.IsolatedAsyncioTestCase):
         self.owner = 123456
         self.other = 999
         self.db = Store(":memory:")
+        self.db.set_setting(self.owner, 'auto_inbox', 'off')
+        self.db.set_setting(self.other, 'auto_inbox', 'off')
         self.telegram = SimpleNamespace(**{
             name: AsyncMock() for name in (
                 "send_message", "send_document", "send_photo", "send_voice", "send_audio",

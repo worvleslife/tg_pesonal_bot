@@ -18,6 +18,8 @@ class AIBotTests(unittest.IsolatedAsyncioTestCase):
         self.owner = 7267009888
         self.other = 8123456789
         self.db = Store(":memory:")
+        self.db.set_setting(self.owner, 'auto_inbox', 'off')
+        self.db.set_setting(self.other, 'auto_inbox', 'off')
         self.created_tasks = []
         self.telegram = SimpleNamespace(send_message=AsyncMock())
         self.app = SimpleNamespace(bot_data={
@@ -167,7 +169,8 @@ class AIBotTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(self.app.bot_data["lock"].locked())
             duplicate = self.update("Второй вопрос")
             await asyncio.wait_for(bot.message(duplicate, self.ctx), timeout=1)
-            self.assertIn("предыдущий", "\n".join(self.responses(duplicate)))
+            self.assertIn("предыдущий", "\n".join(self.responses(original)))
+            duplicate.effective_message.reply_text.assert_not_awaited()
             generate.assert_awaited_once()
             await asyncio.wait_for(bot.message(self.update("Независимая заметка", user=self.other),
                                               self.other_ctx), timeout=1)
