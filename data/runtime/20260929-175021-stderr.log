@@ -1,0 +1,2 @@
+2026-09-29 17:52:49,308 ERROR assistant_bot.bot: Handler failed: TimedOut
+2026-09-29 17:58:46,542 WARNING apscheduler.executors.default: Run time of job "tick (trigger: interval[0:00:05], next run at: 2026-09-29 14:58:49 UTC)" was missed by 0:00:02.376123
